@@ -39,8 +39,7 @@ from llama_cpp.llama_chat_format import Qwen25VLChatHandler
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-HF_REPO_ID = "Floppyshy/sulphur-2-runpod"
-MODEL_SUBDIR = "prompt_enhancer"
+HF_REPO_ID = "Floppyshy/prompt-enhancer"
 MODEL_FILE = "sulphur_prompt_enhancer-Q4_K_M-imatrix.gguf"
 MMPROJ_FILE = "sulphur_prompt_enhancer-mmproj-BF16.gguf"
 
@@ -80,10 +79,10 @@ def _resolve_model_path() -> tuple[str, str | None]:
     if model_path and os.path.isfile(model_path):
         print(f"[enhancer] Using MODEL_PATH from env: {model_path}")
     else:
-        model_path = _find_hf_cached_file(HF_REPO_ID, f"{MODEL_SUBDIR}/{MODEL_FILE}")
+        model_path = _find_hf_cached_file(HF_REPO_ID, MODEL_FILE)
         if not model_path:
             raise FileNotFoundError(
-                f"Model file not found: {MODEL_SUBDIR}/{MODEL_FILE} "
+                f"Model file not found: {MODEL_FILE} "
                 f"in HF cache for {HF_REPO_ID}. "
                 f"Ensure RunPod Model Cache is configured or set MODEL_PATH."
             )
@@ -92,7 +91,7 @@ def _resolve_model_path() -> tuple[str, str | None]:
     if mmproj_path and os.path.isfile(mmproj_path):
         print(f"[enhancer] Using MMPROJ_PATH from env: {mmproj_path}")
     else:
-        mmproj_path = _find_hf_cached_file(HF_REPO_ID, f"{MODEL_SUBDIR}/{MMPROJ_FILE}")
+        mmproj_path = _find_hf_cached_file(HF_REPO_ID, MMPROJ_FILE)
         if mmproj_path:
             print(f"[enhancer] Found mmproj in HF cache: {mmproj_path}")
         else:
