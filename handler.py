@@ -5,7 +5,7 @@ A lightweight standalone endpoint that loads the Sulphur-2 prompt enhancer
 GGUF model (Qwen3.5-based, 9B) and its mmproj vision projection from
 RunPod Model Cache.
 
-Input:
+Input (plain text):
 {
   "input": {
     "prompt": "a basketball player doing a cool maneuver",
@@ -20,19 +20,43 @@ Input:
   }
 }
 
-Output:
+Input (encrypted):
+{
+  "input": {
+    "encrypted_prompt": "gAAAAAB...",  // Fernet token (base64)
+    "encrypt_output": true,            // request encrypted response
+    "image": "base64...",              // optional
+    ...
+  }
+}
+
+Output (plain):
 {
   "output": {
     "enhanced_prompt": "...",
+    "raw_response": "...",
     "input_prompt": "...",
     "image_used": true/false
   }
 }
+
+Output (encrypted):
+{
+  "output": {
+    "enhanced_prompt": "gAAAAAB...",
+    "raw_response": "gAAAAAB...",
+    "input_prompt": "...",
+    "image_used": true/false,
+    "encrypted": true
+  }
+}
 """
 
+import base64
 import os
 import re
 import runpod
+from cryptography.fernet import Fernet, InvalidToken
 from llama_cpp import Llama
 from llama_cpp.llama_chat_format import Qwen25VLChatHandler
 
@@ -48,6 +72,57 @@ DEFAULT_SYSTEM_PROMPT = (
     "detailed video generation description. Output ONLY the finalized prompt paragraph string. "
     "No chat, no filler."
 )
+
+# ---------------------------------------------------------------------------
+# Encryption helpers
+# ---------------------------------------------------------------------------
+_fernet = None
+
+
+def _get_fernet() -> Fernet | None:
+    """Lazy-load Fernet from ENCRYPTION_KEY env var."""
+    global _fernet
+    if _fernet is not None:
+        return _fernet
+
+    key = os.environ.get("ENCRYPTION_KEY")
+    if not key:
+        return None
+
+    # Fernet keys are 32 bytes urlsafe base64 encoded (43 chars + optional padding)
+    # Accept raw base64 or already-urlsafe-base64
+    key_b = key.encode()
+    try:
+        # If the user gave a standard base64 string, convert padding
+        if len(key_b) == 44 and key_b.endswith(b"="):
+            pass
+        elif len(key_b) == 43:
+            key_b += b"="
+        _fernet = Fernet(key_b)
+    except Exception as exc:
+        raise ValueError(f"Invalid ENCRYPTION_KEY format: {exc}")
+
+    return _fernet
+
+
+def _decrypt_text(token: str) -> str:
+    """Decrypt a Fernet token. Returns plain text."""
+    f = _get_fernet()
+    if f is None:
+        raise ValueError("encrypted_prompt provided but ENCRYPTION_KEY is not set.")
+    try:
+        return f.decrypt(token.encode()).decode("utf-8")
+    except InvalidToken:
+        raise ValueError("Invalid encrypted_prompt token (bad key or corrupted data).")
+
+
+def _encrypt_text(plaintext: str) -> str:
+    """Encrypt plain text with Fernet. Returns base64 token string."""
+    f = _get_fernet()
+    if f is None:
+        raise ValueError("encrypt_output requested but ENCRYPTION_KEY is not set.")
+    return f.encrypt(plaintext.encode("utf-8")).decode("utf-8")
+
 
 # ---------------------------------------------------------------------------
 # Model discovery from RunPod Model Cache / HF cache
@@ -215,21 +290,42 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
 def handler(job):
     job_input = job.get("input", {})
 
-    prompt = job_input.get("prompt", "").strip()
-    if not prompt:
-        return {"error": "Missing required field: 'prompt'"}
+    # --- prompt decryption -------------------------------------------------
+    encrypted_prompt = job_input.get("encrypted_prompt")
+    plain_prompt = job_input.get("prompt", "").strip()
+
+    if encrypted_prompt:
+        try:
+            prompt = _decrypt_text(encrypted_prompt).strip()
+        except ValueError as exc:
+            return {"error": str(exc)}
+    elif plain_prompt:
+        prompt = plain_prompt
+    else:
+        return {"error": "Missing required field: 'prompt' or 'encrypted_prompt'"}
 
     image_b64 = job_input.get("image") or None
+    encrypt_output = bool(job_input.get("encrypt_output", False))
 
     # Pass through any extra options
     options = {
         k: v
         for k, v in job_input.items()
-        if k not in ("prompt", "image")
+        if k not in ("prompt", "encrypted_prompt", "image", "encrypt_output")
     }
 
     try:
         result = enhance_prompt(prompt, image_b64=image_b64, options=options)
+
+        # --- output encryption ---------------------------------------------
+        if encrypt_output:
+            try:
+                result["enhanced_prompt"] = _encrypt_text(result["enhanced_prompt"])
+                result["raw_response"] = _encrypt_text(result["raw_response"])
+                result["encrypted"] = True
+            except ValueError as exc:
+                return {"error": str(exc)}
+
         return {"output": result}
     except Exception as e:
         import traceback
