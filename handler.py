@@ -55,7 +55,7 @@ DEFAULT_SYSTEM_PROMPT = (
 # ---------------------------------------------------------------------------
 def _find_hf_cached_file(repo_id: str, filename: str) -> str | None:
     """Search HuggingFace hub cache for a specific file."""
-    repo_dir_name = repo_id.replace("/", "--")
+    repo_dir_name = repo_id.replace("/", "--").lower()
     cache_bases = [
         f"/runpod-volume/huggingface-cache/hub/models--{repo_dir_name}",
         os.path.expanduser(f"~/.cache/huggingface/hub/models--{repo_dir_name}"),
