@@ -3,7 +3,7 @@
 # =============================================================================
 # Standalone endpoint for prompt enhancement.
 # Loads the Qwen3.5-based 9B GGUF model + mmproj vision projection from
-# RunPod Model Cache (HF repo: Floppyshy/sulphur-2-runpod).
+# RunPod Model Cache (HF repo: Floppyshy/prompt-enhancer).
 #
 # Deploy to RunPod Serverless with the image.
 # =============================================================================
@@ -15,20 +15,19 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # ---------------------------------------------------------------------------
-# System deps + Python 3.11
+# System deps + Python 3 (default 3.10 in Ubuntu 22.04)
 # ---------------------------------------------------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-pip \
-    python3.11-dev \
-    build-essential \
-    git \
-    wget \
-    ca-certificates \
+RUN apt-get update -y --fix-missing \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-dev \
+        python3-venv \
+        build-essential \
+        git \
+        wget \
+        ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
 # ---------------------------------------------------------------------------
 # Python deps
