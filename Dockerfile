@@ -13,6 +13,8 @@ FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV PIP_PREFER_BINARY=1
 
 # ---------------------------------------------------------------------------
 # System deps + Python 3 (default 3.10 in Ubuntu 22.04)
@@ -24,6 +26,10 @@ RUN apt-get update -y --fix-missing \
         python3-dev \
         python3-venv \
         build-essential \
+        cmake \
+        ninja-build \
+        pkg-config \
+        libssl-dev \
         git \
         wget \
         ca-certificates \
@@ -33,7 +39,8 @@ RUN apt-get update -y --fix-missing \
 # Python deps
 # ---------------------------------------------------------------------------
 COPY requirements.txt /requirements.txt
-RUN pip install --no-cache-dir -r /requirements.txt
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+    && python3 -m pip install -r /requirements.txt
 
 # ---------------------------------------------------------------------------
 # App

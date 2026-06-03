@@ -1,4 +1,6 @@
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+
 runpod~=1.7.0
 huggingface-hub>=0.25.0
-llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+llama-cpp-python
 cryptography>=42.0.0
