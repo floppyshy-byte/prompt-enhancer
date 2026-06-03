@@ -2,5 +2,5 @@
 
 runpod~=1.7.0
 huggingface-hub>=0.25.0
-llama-cpp-python
+llama-cpp-python==0.3.25
 cryptography>=42.0.0
