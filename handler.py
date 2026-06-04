@@ -144,23 +144,47 @@ def _encrypt_text(plaintext: str) -> str:
 # Model discovery from RunPod Model Cache / HF cache
 # ---------------------------------------------------------------------------
 def _get_cache_snapshot_dirs(repo_id: str) -> list[str]:
-    """Return paths to snapshot directories for a given HF repo in cache."""
-    if not repo_id:
-        return []
-    repo_dir_name = repo_id.replace("/", "--").lower()
-    cache_bases = [
-        f"/runpod-volume/huggingface-cache/hub/models--{repo_dir_name}",
-        os.path.expanduser(f"~/.cache/huggingface/hub/models--{repo_dir_name}"),
+    """Return paths to snapshot directories in HF cache.
+
+    If repo_id is given, searches only that repo.
+    If empty, scans ALL repos under the cache hub for .gguf files.
+    """
+    cache_hubs = [
+        "/runpod-volume/huggingface-cache/hub",
+        os.path.expanduser("~/.cache/huggingface/hub"),
     ]
     dirs = []
-    for base in cache_bases:
-        snapshots = os.path.join(base, "snapshots")
-        if not os.path.isdir(snapshots):
+
+    for hub in cache_hubs:
+        if not os.path.isdir(hub):
             continue
-        for snapshot in os.listdir(snapshots):
-            snapshot_dir = os.path.join(snapshots, snapshot)
-            if os.path.isdir(snapshot_dir):
-                dirs.append(snapshot_dir)
+
+        if repo_id:
+            # Specific repo — look for models--{repo_id}/snapshots/*
+            repo_dir_name = repo_id.replace("/", "--").lower()
+            model_dir = os.path.join(hub, f"models--{repo_dir_name}")
+            snapshots = os.path.join(model_dir, "snapshots")
+            if os.path.isdir(snapshots):
+                for snapshot in os.listdir(snapshots):
+                    snapshot_dir = os.path.join(snapshots, snapshot)
+                    if os.path.isdir(snapshot_dir):
+                        dirs.append(snapshot_dir)
+        else:
+            # No repo specified — scan all models--* directories
+            try:
+                for entry in os.listdir(hub):
+                    if not entry.startswith("models--"):
+                        continue
+                    snapshots = os.path.join(hub, entry, "snapshots")
+                    if not os.path.isdir(snapshots):
+                        continue
+                    for snapshot in os.listdir(snapshots):
+                        snapshot_dir = os.path.join(snapshots, snapshot)
+                        if os.path.isdir(snapshot_dir):
+                            dirs.append(snapshot_dir)
+            except OSError:
+                pass
+
     return dirs
 
 
@@ -226,7 +250,7 @@ def _resolve_model_path() -> tuple[str, str | None]:
 
     # --- auto-discover if either is still missing ---
     if not model_path or (not mmproj_path and model_path):
-        gguf_files = _autodiscover_gguf_files(HF_REPO_ID) if HF_REPO_ID else []
+        gguf_files = _autodiscover_gguf_files(HF_REPO_ID)
         count = len(gguf_files)
 
         if count == 0:

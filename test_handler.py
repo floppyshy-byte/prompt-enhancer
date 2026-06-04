@@ -96,8 +96,14 @@ class TestBuildDataUri:
 # _get_cache_snapshot_dirs
 # =============================================================================
 class TestGetCacheSnapshotDirs:
-    def test_empty_repo_id(self):
-        assert handler._get_cache_snapshot_dirs("") == []
+    def test_empty_repo_id_scans_all_repos(self, tmp_path, monkeypatch):
+        """Without repo_id, scan all models--* dirs under the hub."""
+        _make_cache(tmp_path, "myorg/myrepo", {"model.gguf": 1000})
+        _make_cache(tmp_path, "otherorg/otherrepo", {"other.gguf": 500})
+        monkeypatch.setattr(handler.os.path, "expanduser",
+                            _mock_expanduser(str(tmp_path / "hub")))
+        dirs = handler._get_cache_snapshot_dirs("")
+        assert len(dirs) == 2  # one snapshot per repo
 
     def test_finds_snapshots(self, tmp_path, monkeypatch):
         _make_cache(tmp_path, "myorg/myrepo", {"model.gguf": 1000})
@@ -313,6 +319,20 @@ class TestResolveModelPath:
         # model_path was explicit, so the 3-file ambiguity only affects mmproj,
         # which gets skipped (None) rather than raising an error.
         assert mm is None
+
+    def test_autodiscover_without_hf_repo_id(self, tmp_path, monkeypatch):
+        """Auto-discovery works even when HF_REPO_ID is empty (scans all repos)."""
+        _make_cache(tmp_path, "myorg/myrepo", {"model.gguf": 5000})
+        monkeypatch.setattr(handler.os.path, "expanduser",
+                            _mock_expanduser(str(tmp_path / "hub")))
+        monkeypatch.delenv("MODEL_PATH", raising=False)
+        monkeypatch.delenv("MMPROJ_PATH", raising=False)
+        monkeypatch.delenv("MODEL_FILE", raising=False)
+        monkeypatch.delenv("MMPROJ_FILE", raising=False)
+        monkeypatch.setattr(handler, "HF_REPO_ID", "")
+        m, mm = handler._resolve_model_path()
+        assert m.endswith("model.gguf")
+        assert mm is None  # only 1 file → text-only
 
 
 # =============================================================================
