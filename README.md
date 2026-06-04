@@ -47,6 +47,7 @@ auto-discovers models from the RunPod Model Cache if not specified.
 | `MMPROJ_FILE` | no | — (auto-discovered) | Specific mmproj filename in cache |
 | `ENCRYPTION_KEY` | no | — | Fernet key for encrypt/decrypt |
 | `LLAMA_SERVER_PORT` | no | `8081` | Internal port for llama-server |
+| `MAX_TOKENS` | no | `5000` | Default max generation length (tokens) |
 
 \* Required if no models are in RunPod Model Cache.
 
@@ -134,7 +135,7 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 | Param | Default | Description |
 |-------|---------|-------------|
 | `system_prompt` | `$SYSTEM_PROMPT` env var | Override the system instruction per-request |
-| `max_tokens` | 512 | Max generation length |
+| `max_tokens` | `5000` | Max generation length (overrides `$MAX_TOKENS`) |
 | `temperature` | 0.7 | Sampling temperature |
 | `top_p` | 0.9 | Nucleus sampling |
 | `top_k` | 40 | Top-k sampling |
@@ -149,6 +150,7 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
   "output": {
     "enhanced_prompt": "A professional basketball player executes a stunning crossover dribble on a sunlit outdoor court...",
     "raw_response": "A professional basketball player...",
+    "thinking": "The user wants a sports scene, so I'll add dynamic lighting, motion blur, and court details...",
     "input_prompt": "a basketball player doing a cool maneuver",
     "image_used": false
   }
@@ -162,12 +164,22 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
   "output": {
     "enhanced_prompt": "gAAAAAB...",
     "raw_response": "gAAAAAB...",
+    "thinking": "gAAAAAB...",
     "input_prompt": "a basketball player doing a cool maneuver",
     "image_used": false,
     "encrypted": true
   }
 }
 ```
+
+### The `thinking` field
+
+The `thinking` field contains the model's internal reasoning / chain-of-thought, extracted from:
+
+1. The `reasoning_content` key (Qwen3 and similar models), **or**
+2. Text inside `<think>...</think>` tags in the response content
+
+If neither is present, `thinking` is an empty string. The `enhanced_prompt` never includes thinking content — it is always stripped out.
 
 ## How It Works
 

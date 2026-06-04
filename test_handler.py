@@ -461,6 +461,7 @@ class TestEnhancePrompt:
         assert result["input_prompt"] == "a sunset"
         assert result["image_used"] is False
         assert result["enhanced_prompt"] == "A stunning golden sunset."
+        assert result["thinking"] == "let me enhance this"
         assert "think" in result["raw_response"]
 
     def test_image_request(self, monkeypatch):
@@ -529,6 +530,7 @@ class TestHandler:
             return {
                 "enhanced_prompt": "Enhanced: " + prompt,
                 "raw_response": "Raw: " + prompt,
+                "thinking": "",
                 "input_prompt": prompt,
                 "image_used": False,
             }
@@ -555,6 +557,7 @@ class TestHandler:
             return {
                 "enhanced_prompt": "Enhanced: " + prompt,
                 "raw_response": "Raw: " + prompt,
+                "thinking": "",
                 "input_prompt": prompt,
                 "image_used": False,
             }

@@ -430,6 +430,14 @@ def _strip_thinking_tags(text: str) -> str:
     return text
 
 
+def _extract_thinking_tags(text: str) -> str:
+    """Extract content inside <think>...</think> tags if present."""
+    match = re.search(r"<think>(.*?)</think>", text, flags=re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
 def _build_data_uri(image_b64: str) -> str:
     """Validate and return a proper data URI from base64 input."""
     clean_b64 = image_b64.strip()
@@ -442,7 +450,9 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
     """Run the prompt enhancer via llama-server and return the enhanced text."""
     options = options or {}
     system_prompt = options.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
-    max_tokens = int(options.get("max_tokens", 2048))
+    max_tokens = int(
+        options.get("max_tokens", os.environ.get("MAX_TOKENS", 5000))
+    )
     temperature = float(options.get("temperature", 0.7))
     top_p = float(options.get("top_p", 0.9))
     top_k = int(options.get("top_k", 40))
@@ -504,25 +514,36 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
 
     choice = response["choices"][0]
     message = choice["message"]
-    raw_text = message.get("content", "") or ""
+    content = message.get("content", "") or ""
 
     # Qwen3 models use reasoning_content for their thinking process.
-    # Include it in raw_response and fall back to it if content is empty.
     reasoning = message.get("reasoning_content", "") or ""
-    if raw_text:
-        raw_text = reasoning + "\n\n" + raw_text if reasoning else raw_text
-    elif reasoning:
+
+    # Extract thinking from <think> tags in content
+    thinking_from_tags = _extract_thinking_tags(content)
+
+    # thinking field: reasoning_content takes precedence, fall back to tags
+    thinking = reasoning or thinking_from_tags
+
+    # Build raw_response (full text including reasoning)
+    if content and reasoning:
+        raw_text = reasoning + "\n\n" + content
+    elif content:
+        raw_text = content
+    else:
         raw_text = reasoning
 
     print(f"[enhancer] finish_reason={choice.get('finish_reason')!r}  "
-          f"content_len={len(raw_text)}  reasoning_len={len(reasoning)}",
+          f"content_len={len(content)}  reasoning_len={len(reasoning)}",
           flush=True)
 
-    enhanced = _strip_thinking_tags(raw_text)
+    # enhanced_prompt: content with <think> tags stripped, no reasoning
+    enhanced = _strip_thinking_tags(content)
 
     return {
         "enhanced_prompt": enhanced.strip(),
         "raw_response": raw_text.strip(),
+        "thinking": thinking,
         "input_prompt": prompt,
         "image_used": bool(image_b64),
     }
