@@ -26,14 +26,19 @@ Input (plain text):
   }
 }
 
-Input (encrypted):
+Input (encrypted payload):
 {
   "input": {
-    "encrypted_prompt": "gAAAAAB...",  // Fernet token (base64)
-    "encrypt_output": true,            // request encrypted response
-    "image": "base64...",              // optional
-    ...
+    "encrypted_payload": "gAAAAAB..."  // Fernet-encrypted JSON
   }
+}
+
+Decrypting the payload yields the full input dict, e.g.:
+{
+  "prompt": "a basketball player...",
+  "encrypt_output": true,
+  "max_tokens": 512,
+  ...
 }
 
 Output (plain):
@@ -41,6 +46,7 @@ Output (plain):
   "output": {
     "enhanced_prompt": "...",
     "raw_response": "...",
+    "thinking": "...",
     "input_prompt": "...",
     "image_used": true/false
   }
@@ -49,13 +55,12 @@ Output (plain):
 Output (encrypted):
 {
   "output": {
-    "enhanced_prompt": "gAAAAAB...",
-    "raw_response": "gAAAAAB...",
-    "input_prompt": "...",
-    "image_used": true/false,
+    "encrypted_payload": "gAAAAAB...",  // full result JSON as one encrypted blob
     "encrypted": true
   }
 }
+
+Decrypting the payload yields the full result dict.
 """
 
 import atexit
@@ -138,6 +143,20 @@ def _encrypt_text(plaintext: str) -> str:
     if f is None:
         raise ValueError("encrypt_output requested but ENCRYPTION_KEY is not set.")
     return f.encrypt(plaintext.encode("utf-8")).decode("utf-8")
+
+
+def _encrypt_json(data: dict) -> str:
+    """Encrypt a dict as a JSON string. Returns base64 token string."""
+    return _encrypt_text(json.dumps(data, ensure_ascii=False))
+
+
+def _decrypt_json(token: str) -> dict:
+    """Decrypt a Fernet token and parse as JSON. Returns a dict."""
+    plaintext = _decrypt_text(token)
+    try:
+        return json.loads(plaintext)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Decrypted payload is not valid JSON: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -555,19 +574,23 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
 def handler(job):
     job_input = job.get("input", {})
 
-    # --- prompt decryption -------------------------------------------------
-    encrypted_prompt = job_input.get("encrypted_prompt")
-    plain_prompt = job_input.get("prompt", "").strip()
-
-    if encrypted_prompt:
+    # --- payload decryption -----------------------------------------------
+    encrypted_payload = job_input.get("encrypted_payload")
+    if encrypted_payload:
         try:
-            prompt = _decrypt_text(encrypted_prompt).strip()
+            decrypted = _decrypt_json(encrypted_payload)
+            if not isinstance(decrypted, dict):
+                return {"error": "Decrypted payload must be a JSON object"}
+            # Merge decrypted payload with outer job_input (outer wins on conflict)
+            merged = {**decrypted, **job_input}
+            merged.pop("encrypted_payload", None)
+            job_input = merged
         except ValueError as exc:
             return {"error": str(exc)}
-    elif plain_prompt:
-        prompt = plain_prompt
-    else:
-        return {"error": "Missing required field: 'prompt' or 'encrypted_prompt'"}
+
+    prompt = job_input.get("prompt", "").strip()
+    if not prompt:
+        return {"error": "Missing required field: 'prompt'"}
 
     image_b64 = job_input.get("image") or None
     encrypt_output = bool(job_input.get("encrypt_output", False))
@@ -576,7 +599,7 @@ def handler(job):
     options = {
         k: v
         for k, v in job_input.items()
-        if k not in ("prompt", "encrypted_prompt", "image", "encrypt_output")
+        if k not in ("prompt", "image", "encrypt_output")
     }
 
     try:
@@ -585,9 +608,10 @@ def handler(job):
         # --- output encryption ---------------------------------------------
         if encrypt_output:
             try:
-                result["enhanced_prompt"] = _encrypt_text(result["enhanced_prompt"])
-                result["raw_response"] = _encrypt_text(result["raw_response"])
-                result["encrypted"] = True
+                return {"output": {
+                    "encrypted_payload": _encrypt_json(result),
+                    "encrypted": True,
+                }}
             except ValueError as exc:
                 return {"error": str(exc)}
 

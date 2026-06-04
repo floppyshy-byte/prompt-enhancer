@@ -390,6 +390,27 @@ class TestFernet:
         f2 = handler._get_fernet()
         assert f1 is f2
 
+    def test_encrypt_decrypt_json_roundtrip(self, monkeypatch):
+        from cryptography.fernet import Fernet
+        key = Fernet.generate_key().decode()
+        monkeypatch.setenv("ENCRYPTION_KEY", key)
+        handler._fernet = None
+        original = {"prompt": "hello", "max_tokens": 100}
+        encrypted = handler._encrypt_json(original)
+        assert encrypted != json.dumps(original)
+        decrypted = handler._decrypt_json(encrypted)
+        assert decrypted == original
+
+    def test_decrypt_json_invalid_json(self, monkeypatch):
+        from cryptography.fernet import Fernet
+        key = Fernet.generate_key().decode()
+        monkeypatch.setenv("ENCRYPTION_KEY", key)
+        handler._fernet = None
+        # Encrypt something that is NOT valid JSON
+        encrypted = handler._encrypt_text("not-json{[")
+        with pytest.raises(ValueError, match="not valid JSON"):
+            handler._decrypt_json(encrypted)
+
 
 # =============================================================================
 # _find_llama_server
@@ -542,16 +563,17 @@ class TestHandler:
     def test_missing_prompt(self, monkeypatch):
         result = handler.handler({"input": {}})
         assert "error" in result
-        err = result["error"].lower()
-        assert "prompt" in err or "encrypted_prompt" in err
+        assert "prompt" in result["error"].lower()
 
-    def test_encrypted_prompt(self, monkeypatch):
+    def test_encrypted_payload_input(self, monkeypatch):
         from cryptography.fernet import Fernet
         key = Fernet.generate_key().decode()
         monkeypatch.setenv("ENCRYPTION_KEY", key)
         handler._fernet = None
         fernet = handler._get_fernet()
-        encrypted = fernet.encrypt(b"secret prompt").decode()
+
+        payload = {"prompt": "secret prompt", "max_tokens": 256}
+        encrypted = fernet.encrypt(json.dumps(payload).encode()).decode()
 
         def mock_enhance(prompt, image_b64=None, options=None):
             return {
@@ -563,10 +585,40 @@ class TestHandler:
             }
         monkeypatch.setattr(handler, "enhance_prompt", mock_enhance)
 
-        result = handler.handler({"input": {"encrypted_prompt": encrypted}})
+        result = handler.handler({"input": {"encrypted_payload": encrypted}})
         assert result["output"]["input_prompt"] == "secret prompt"
+        assert result["output"]["enhanced_prompt"] == "Enhanced: secret prompt"
 
-    def test_encrypt_output(self, monkeypatch):
+    def test_encrypted_payload_with_encrypt_output(self, monkeypatch):
+        from cryptography.fernet import Fernet
+        key = Fernet.generate_key().decode()
+        monkeypatch.setenv("ENCRYPTION_KEY", key)
+        handler._fernet = None
+        fernet = handler._get_fernet()
+
+        payload = {"prompt": "test", "encrypt_output": True, "max_tokens": 128}
+        encrypted = fernet.encrypt(json.dumps(payload).encode()).decode()
+
+        def mock_enhance(prompt, image_b64=None, options=None):
+            return {
+                "enhanced_prompt": "enhanced text",
+                "raw_response": "raw text",
+                "thinking": "",
+                "input_prompt": prompt,
+                "image_used": False,
+            }
+        monkeypatch.setattr(handler, "enhance_prompt", mock_enhance)
+
+        result = handler.handler({"input": {"encrypted_payload": encrypted}})
+        assert result["output"]["encrypted"] is True
+        assert "encrypted_payload" in result["output"]
+        # Decrypt the full payload
+        decrypted = handler._decrypt_json(result["output"]["encrypted_payload"])
+        assert decrypted["enhanced_prompt"] == "enhanced text"
+        assert decrypted["raw_response"] == "raw text"
+        assert decrypted["input_prompt"] == "test"
+
+    def test_plain_input_with_encrypt_output(self, monkeypatch):
         from cryptography.fernet import Fernet
         key = Fernet.generate_key().decode()
         monkeypatch.setenv("ENCRYPTION_KEY", key)
@@ -576,6 +628,7 @@ class TestHandler:
             return {
                 "enhanced_prompt": "enhanced text",
                 "raw_response": "raw text",
+                "thinking": "",
                 "input_prompt": prompt,
                 "image_used": False,
             }
@@ -585,9 +638,9 @@ class TestHandler:
             {"input": {"prompt": "test", "encrypt_output": True}}
         )
         assert result["output"]["encrypted"] is True
-        assert result["output"]["enhanced_prompt"] != "enhanced text"
-        decrypted = handler._decrypt_text(result["output"]["enhanced_prompt"])
-        assert decrypted == "enhanced text"
+        assert "encrypted_payload" in result["output"]
+        decrypted = handler._decrypt_json(result["output"]["encrypted_payload"])
+        assert decrypted["enhanced_prompt"] == "enhanced text"
 
     def test_passes_extra_options(self, monkeypatch):
         captured_options = {}
