@@ -34,20 +34,36 @@ docker build -t prompt-enhancer:latest .
 
 ### 2. Configure
 
-Set these env vars on your RunPod serverless endpoint:
+Set these env vars on your RunPod serverless endpoint. Most are optional — the handler
+auto-discovers models from the RunPod Model Cache if not specified.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `SYSTEM_PROMPT` | no | generic enhancer prompt | Default system prompt for all requests |
 | `MODEL_PATH` | no* | auto-discovered | Path to GGUF model file |
 | `MMPROJ_PATH` | no | auto-discovered | Path to mmproj for vision (optional) |
-| `HF_REPO_ID` | no | `Floppyshy/prompt-enhancer` | HF repo for model cache discovery |
-| `MODEL_FILE` | no | `sulphur_prompt_enhancer-Q4_K_M-imatrix.gguf` | Model filename in cache |
-| `MMPROJ_FILE` | no | `sulphur_prompt_enhancer-mmproj-BF16.gguf` | mmproj filename in cache |
+| `HF_REPO_ID` | no | — (scans all cache) | HF repo to search for models in cache |
+| `MODEL_FILE` | no | — (auto-discovered) | Specific model filename in cache |
+| `MMPROJ_FILE` | no | — (auto-discovered) | Specific mmproj filename in cache |
 | `ENCRYPTION_KEY` | no | — | Fernet key for encrypt/decrypt |
 | `LLAMA_SERVER_PORT` | no | `8081` | Internal port for llama-server |
 
-\* Required if models aren't in RunPod Model Cache.
+\* Required if no models are in RunPod Model Cache.
+
+### Model auto-discovery
+
+When `MODEL_PATH`, `MODEL_FILE`, and `MMPROJ_FILE` are all empty, the handler scans
+the cache directory and picks up whatever `.gguf` files it finds:
+
+- **Model:** the largest `.gguf` file without "mmproj" in its name
+- **Vision projection:** any `.gguf` file with "mmproj" in its name
+
+This means you can drop any GGUF model (and optional mmproj) into a HuggingFace
+repo, configure RunPod Model Cache to pull that repo, and the handler will find
+it automatically — no env vars needed.
+
+If you want to be explicit, set `MODEL_FILE` and/or `MMPROJ_FILE` to specific
+filenames, or `MODEL_PATH`/`MMPROJ_PATH` to absolute paths.
 
 ### 3. Deploy to RunPod Serverless
 
@@ -166,18 +182,18 @@ invocation pays the model-load cost.
 
 ## Using Your Own Model
 
-Set these env vars to point to any GGUF model:
+The handler auto-discovers models — just configure RunPod Model Cache to pull
+from a HuggingFace repo containing your GGUF files. No env vars required.
+
+To be explicit, set one or more of these:
 
 ```bash
-MODEL_PATH=/runpod-volume/models/my-model.gguf      # or let it be discovered from cache
-HF_REPO_ID=my-org/my-model-repo
-MODEL_FILE=my-model-Q4_K_M.gguf
-MMPROJ_FILE=my-model-mmproj.gguf                     # optional, for vision
+MODEL_PATH=/runpod-volume/models/my-model.gguf     # exact path
+HF_REPO_ID=my-org/my-model-repo                    # which cache repo to scan
+MODEL_FILE=my-model-Q4_K_M.gguf                    # specific filename in cache
+MMPROJ_FILE=my-model-mmproj.gguf                   # optional, for vision
 SYSTEM_PROMPT=You are a prompt enhancer for flux...
 ```
-
-The handler will use your model and system prompt for all requests. Per-request
-`system_prompt` overrides the default.
 
 ## Notes
 
