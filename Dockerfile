@@ -32,4 +32,6 @@ WORKDIR /app
 COPY handler.py /app/handler.py
 
 # RunPod serverless entrypoint
+# Reset ENTRYPOINT inherited from the server-cuda image (which defaults to llama-server)
+ENTRYPOINT []
 CMD ["python3", "-u", "handler.py"]
