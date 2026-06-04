@@ -1,51 +1,20 @@
 # =============================================================================
 # Prompt Enhancer — RunPod Serverless Worker
 # =============================================================================
-# Uses llama.cpp's llama-server binary (built from source with CUDA) for
+# Uses llama.cpp's llama-server binary (pre-built with CUDA from ai-dock) for
 # inference instead of llama-cpp-python.
 #
 # Deploy to RunPod Serverless with the image.
 # =============================================================================
 
-# ---------------------------------------------------------------------------
-# Stage 1: Build llama.cpp with CUDA support
-# ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS llama-builder
-
-RUN apt-get update -y \
-    && apt-get install -y --no-install-recommends \
-        git \
-        cmake \
-        ccache \
-        build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# Pin to a specific release tag for reproducibility
-ARG LLAMA_CPP_VERSION=b9496
-RUN git clone --depth 1 --branch ${LLAMA_CPP_VERSION} \
-    https://github.com/ggml-org/llama.cpp.git /llama.cpp
-
-WORKDIR /llama.cpp
-RUN --mount=type=cache,target=/root/.ccache \
-    cmake -B build \
-        -DGGML_CUDA=ON \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-    && cmake --build build --config Release -j$(nproc) --target llama-server \
-    && ccache -s
-
-# ---------------------------------------------------------------------------
-# Stage 2: Runtime
-# ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
 
-# System deps — much leaner: no cmake, ninja, or build-essential needed
+# System deps — lightweight, no build tools needed
 RUN apt-get update -y --fix-missing \
     && apt-get install -y --no-install-recommends \
         python3 \
@@ -55,16 +24,23 @@ RUN apt-get update -y --fix-missing \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps — just runpod + cryptography (no llama-cpp-python)
+# Python deps — just runpod + cryptography
 COPY requirements.txt /requirements.txt
 RUN python3 -m pip install --upgrade pip setuptools wheel \
     && python3 -m pip install -r /requirements.txt
 
-# Copy llama-server binary from build stage
-COPY --from=llama-builder /llama.cpp/build/bin/llama-server /usr/local/bin/llama-server
-
-# Verify the binary works
-RUN llama-server --version
+# ---------------------------------------------------------------------------
+# llama.cpp pre-built binary (ai-dock/llama.cpp-cuda)
+# CUDA 12.8, supports SM 7.5–12.0 (includes RTX 4090 / SM 8.9)
+# ---------------------------------------------------------------------------
+ARG LLAMA_CPP_TAG=b9484
+RUN wget -q "https://github.com/ai-dock/llama.cpp-cuda/releases/download/${LLAMA_CPP_TAG}/llama.cpp-${LLAMA_CPP_TAG}-cuda-12.8-amd64.tar.gz" \
+        -O /tmp/llama.cpp.tar.gz \
+    && tar -xzf /tmp/llama.cpp.tar.gz -C /tmp \
+    && cp /tmp/cuda-12.8/bin/llama-server /usr/local/bin/llama-server \
+    && rm -rf /tmp/llama.cpp.tar.gz /tmp/cuda-12.8 \
+    && chmod +x /usr/local/bin/llama-server \
+    && llama-server --version
 
 # App
 WORKDIR /app
