@@ -36,8 +36,12 @@ COPY requirements.txt /requirements.txt
 RUN python3 -m pip install --upgrade pip setuptools wheel \
     && python3 -m pip install -r /requirements.txt
 
-# Copy llama-server from the official image
+# Copy llama-server binary and shared libraries from the official image
 COPY --from=llama /app/llama-server /usr/local/bin/llama-server
+COPY --from=llama /app/*.so* /usr/local/lib/
+
+# Update linker cache so the binary finds its libs
+RUN ldconfig
 
 # Verify the binary works
 RUN llama-server --version
