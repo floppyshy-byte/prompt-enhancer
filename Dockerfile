@@ -29,6 +29,7 @@ RUN apt-get update -y --fix-missing \
         python3-pip \
         python3-venv \
         ca-certificates \
+        libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps — just runpod + cryptography
