@@ -53,17 +53,18 @@ auto-discovers models from the RunPod Model Cache if not specified.
 ### Model auto-discovery
 
 When `MODEL_PATH`, `MODEL_FILE`, and `MMPROJ_FILE` are all empty, the handler scans
-the cache directory and picks up whatever `.gguf` files it finds:
+the cache directory for `.gguf` files, sorts them by size, and determines the setup:
 
-- **Model:** the largest `.gguf` file without "mmproj" in its name
-- **Vision projection:** any `.gguf` file with "mmproj" in its name
+| GGUF files found | Behavior |
+|---|---|
+| **0** | Error — no model available |
+| **1** | Text-only mode (that single file is the model) |
+| **2** | Vision mode — larger file is the model, smaller is the mmproj |
+| **3+** | Error — ambiguous, set `MODEL_FILE`/`MMPROJ_FILE` to be explicit |
 
 This means you can drop any GGUF model (and optional mmproj) into a HuggingFace
 repo, configure RunPod Model Cache to pull that repo, and the handler will find
 it automatically — no env vars needed.
-
-If you want to be explicit, set `MODEL_FILE` and/or `MMPROJ_FILE` to specific
-filenames, or `MODEL_PATH`/`MMPROJ_PATH` to absolute paths.
 
 ### 3. Deploy to RunPod Serverless
 

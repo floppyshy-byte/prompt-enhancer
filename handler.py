@@ -174,52 +174,35 @@ def _find_hf_cached_file(repo_id: str, filename: str) -> str | None:
     return None
 
 
-def _autodiscover_model(repo_id: str) -> str | None:
-    """Find any GGUF model file in cache (excludes mmproj files).
-
-    Prefers files without 'mmproj' in the name. If multiple candidates,
-    picks the largest file.
-    """
-    candidates = []
+def _autodiscover_gguf_files(repo_id: str) -> list[tuple[int, str]]:
+    """Find all .gguf files in cache, sorted by size (largest first)."""
+    files: dict[str, int] = {}  # path -> size (dedupe across snapshots)
     for snapshot_dir in _get_cache_snapshot_dirs(repo_id):
         try:
             for f in os.listdir(snapshot_dir):
-                if f.endswith(".gguf") and "mmproj" not in f.lower():
+                if f.endswith(".gguf"):
                     path = os.path.join(snapshot_dir, f)
-                    candidates.append((os.path.getsize(path), path))
+                    files[path] = os.path.getsize(path)
         except OSError:
             continue
-    if not candidates:
-        return None
-    candidates.sort(reverse=True)
-    return candidates[0][1]
-
-
-def _autodiscover_mmproj(repo_id: str) -> str | None:
-    """Find any mmproj GGUF file in cache."""
-    for snapshot_dir in _get_cache_snapshot_dirs(repo_id):
-        try:
-            for f in os.listdir(snapshot_dir):
-                if f.endswith(".gguf") and "mmproj" in f.lower():
-                    return os.path.join(snapshot_dir, f)
-        except OSError:
-            continue
-    return None
+    # Sort by size descending: (size, path)
+    return sorted(
+        [(size, path) for path, size in files.items()],
+        reverse=True,
+    )
 
 
 def _resolve_model_path() -> tuple[str, str | None]:
     """Return (model_path, mmproj_path) from env, cache, or bail.
 
-    Resolution order for model:
-      1. MODEL_PATH env var (exact path)
-      2. MODEL_FILE env var (filename to find in cache)
-      3. Auto-discover any .gguf in HF_REPO_ID cache (excluding mmproj)
-      4. Auto-discover in any available cache repo
-
-    Resolution order for mmproj:
-      1. MMPROJ_PATH env var (exact path)
-      2. MMPROJ_FILE env var (filename to find in cache)
-      3. Auto-discover any mmproj .gguf in cache
+    Resolution order:
+      1. MODEL_PATH / MMPROJ_PATH env vars (exact paths)
+      2. MODEL_FILE / MMPROJ_FILE env vars (specific filenames in cache)
+      3. Auto-discover all .gguf files in cache:
+         - 0 files → error
+         - 1 file  → text-only model (no mmproj)
+         - 2 files → larger = model, smaller = mmproj (vision)
+         - 3+ files → error (ambiguous)
     """
     model_path = os.environ.get("MODEL_PATH")
     mmproj_path = os.environ.get("MMPROJ_PATH")
@@ -231,16 +214,6 @@ def _resolve_model_path() -> tuple[str, str | None]:
         model_path = _find_hf_cached_file(HF_REPO_ID, MODEL_FILE) if MODEL_FILE else None
         if model_path:
             print(f"[enhancer] Found model by name in cache: {model_path}")
-        elif HF_REPO_ID:
-            model_path = _autodiscover_model(HF_REPO_ID)
-            if model_path:
-                print(f"[enhancer] Auto-discovered model in cache: {model_path}")
-
-        if not model_path:
-            raise FileNotFoundError(
-                "No model found. Set MODEL_PATH to a GGUF file, MODEL_FILE to a "
-                "filename in cache, or HF_REPO_ID to auto-discover from cache."
-            )
 
     # --- resolve mmproj ---
     if mmproj_path and os.path.isfile(mmproj_path):
@@ -249,15 +222,49 @@ def _resolve_model_path() -> tuple[str, str | None]:
         mmproj_path = _find_hf_cached_file(HF_REPO_ID, MMPROJ_FILE) if MMPROJ_FILE else None
         if mmproj_path:
             print(f"[enhancer] Found mmproj by name in cache: {mmproj_path}")
-        elif HF_REPO_ID:
-            mmproj_path = _autodiscover_mmproj(HF_REPO_ID)
-            if mmproj_path:
-                print(f"[enhancer] Auto-discovered mmproj in cache: {mmproj_path}")
-        else:
-            mmproj_path = _autodiscover_mmproj(HF_REPO_ID)  # also try without HF_REPO_ID? no
 
-        if not mmproj_path:
-            print("[enhancer] No mmproj found; vision will be disabled.")
+    # --- auto-discover if either is still missing ---
+    if not model_path or (not mmproj_path and model_path):
+        gguf_files = _autodiscover_gguf_files(HF_REPO_ID) if HF_REPO_ID else []
+        count = len(gguf_files)
+
+        if count == 0:
+            if not model_path:
+                raise FileNotFoundError(
+                    "No .gguf files found in cache. "
+                    "Set MODEL_PATH, MODEL_FILE, or configure RunPod Model Cache."
+                )
+
+        elif count == 1:
+            if not model_path:
+                model_path = gguf_files[0][1]
+                print(f"[enhancer] Auto-discovered model (sole .gguf, text-only): {model_path}")
+            # mmproj stays None — single file means text-only
+
+        elif count == 2:
+            # Larger = model, smaller = mmproj
+            larger = gguf_files[0][1]
+            smaller = gguf_files[1][1]
+            if not model_path:
+                model_path = larger
+                print(f"[enhancer] Auto-discovered model (larger .gguf): {model_path}")
+            if model_path == larger and not mmproj_path:
+                mmproj_path = smaller
+                print(f"[enhancer] Auto-discovered mmproj (smaller .gguf): {mmproj_path}")
+            elif model_path == smaller and not mmproj_path:
+                mmproj_path = larger
+                print(f"[enhancer] Auto-discovered mmproj (larger .gguf): {mmproj_path}")
+
+        else:  # count >= 3
+            files_list = "\n".join(f"  {size:>15d}  {path}" for size, path in gguf_files)
+            raise FileNotFoundError(
+                f"Found {count} .gguf files in cache — don't know which is the model "
+                f"and which is the mmproj. Set MODEL_FILE and MMPROJ_FILE to be explicit.\n"
+                f"Files found:\n{files_list}"
+            )
+
+    if not mmproj_path:
+        print("[enhancer] No mmproj found; vision will be disabled.")
 
     return model_path, mmproj_path
 
