@@ -30,10 +30,9 @@ RUN apt-get update -y --fix-missing \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps — --break-system-packages needed on Ubuntu 24.04 (PEP 668)
+# Python deps — skip upgrading system pip to avoid Debian RECORD file crashes
 COPY requirements.txt /requirements.txt
-RUN python3 -m pip install --upgrade pip setuptools wheel --break-system-packages \
-    && python3 -m pip install -r /requirements.txt --break-system-packages
+RUN python3 -m pip install --no-cache-dir --break-system-packages -r /requirements.txt
 
 # Extract llama-server binary and shared libraries from the official image
 # (verified: the server-cuda image puts everything in /app/)
