@@ -1,34 +1,63 @@
-# Sulphur Prompt Enhancer — RunPod Serverless
+# Prompt Enhancer — RunPod Serverless
 
-Standalone serverless endpoint for the Sulphur-2 prompt enhancer.
-Takes a text prompt (and optionally an image) and returns an enhanced, detailed prompt suitable for video generation.
+A generic serverless endpoint for prompt enhancement. Takes a text prompt
+(and optionally an image) and returns an enhanced, detailed prompt. The
+system prompt is fully configurable — use any instruct/chat GGUF model.
 
 ## Architecture
 
-- **Base model:** Qwen3.5-based 9B parameter VLM (GGUF Q4_K_M)
-- **Vision projection:** mmproj BF16 (922 MB)
-- **Inference:** `llama-cpp-python` with CUDA offloading
-- **GPU target:** RTX 4090 (24 GB) — loads both models comfortably
-- **Models:** Loaded from RunPod Model Cache (HF repo `Floppyshy/prompt-enhancer`)
+- **Inference:** llama.cpp `llama-server` binary (compiled from source with CUDA in the Docker build)
+- **Model:** Any GGUF model (text-only or with mmproj vision projection)
+- **GPU target:** RTX 4090 (24 GB) recommended for 9B+ models
+- **Models:** Discovered from RunPod Model Cache or specified via env vars
+
+The handler spawns `llama-server` as a subprocess and communicates via its
+OpenAI-compatible HTTP API (`/v1/chat/completions`). No `llama-cpp-python`
+dependency.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | CUDA 12.4 runtime image (no build-time model downloads) |
-| `handler.py` | RunPod serverless handler (text + vision + encryption) |
-| `requirements.txt` | Python dependencies for the handler |
-| `server.py` | Optional FastAPI proxy server with polling + SQLite history |
-| `requirements-server.txt` | Python dependencies for the proxy server |
+| `Dockerfile` | Multi-stage build: compiles llama.cpp with CUDA, then installs Python deps |
+| `handler.py` | RunPod serverless handler (text + vision + Fernet encryption) |
+| `requirements.txt` | Python dependencies (`runpod`, `cryptography`) |
 | `.github/workflows/docker-build.yml` | CI — validates Dockerfile builds on push/PR |
 
-## Handler Build
+## Quick Start
+
+### 1. Build the image
 
 ```bash
 docker build -t prompt-enhancer:latest .
 ```
 
-Models are **not** baked into the image. They are discovered at runtime from RunPod Model Cache or from env vars (`MODEL_PATH`, `MMPROJ_PATH`).
+### 2. Configure
+
+Set these env vars on your RunPod serverless endpoint:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SYSTEM_PROMPT` | no | generic enhancer prompt | Default system prompt for all requests |
+| `MODEL_PATH` | no* | auto-discovered | Path to GGUF model file |
+| `MMPROJ_PATH` | no | auto-discovered | Path to mmproj for vision (optional) |
+| `HF_REPO_ID` | no | `Floppyshy/prompt-enhancer` | HF repo for model cache discovery |
+| `MODEL_FILE` | no | `sulphur_prompt_enhancer-Q4_K_M-imatrix.gguf` | Model filename in cache |
+| `MMPROJ_FILE` | no | `sulphur_prompt_enhancer-mmproj-BF16.gguf` | mmproj filename in cache |
+| `ENCRYPTION_KEY` | no | — | Fernet key for encrypt/decrypt |
+| `LLAMA_SERVER_PORT` | no | `8081` | Internal port for llama-server |
+
+\* Required if models aren't in RunPod Model Cache.
+
+### 3. Deploy to RunPod Serverless
+
+1. Push the Docker image to a registry (Docker Hub, GHCR, etc.)
+2. In RunPod Console → Serverless → New Endpoint:
+   - **Container Image:** your registry image URL
+   - **GPU:** RTX 4090 or better (for 9B+ models)
+   - **Workers:** configure min/max as needed
+   - **Environment Variables:** set as needed (see above)
+3. Optionally configure **Model Cache** to pull models from a HuggingFace repo
 
 ## Handler API
 
@@ -38,6 +67,17 @@ Models are **not** baked into the image. They are discovered at runtime from Run
 {
   "input": {
     "prompt": "a basketball player doing a cool maneuver"
+  }
+}
+```
+
+### Request — with custom system prompt
+
+```json
+{
+  "input": {
+    "prompt": "a cozy cabin in the woods",
+    "system_prompt": "You are a Stable Diffusion prompt enhancer. Add camera details, lighting, and artistic style. Output ONLY the prompt."
   }
 }
 ```
@@ -53,13 +93,15 @@ Models are **not** baked into the image. They are discovered at runtime from Run
 }
 ```
 
-The `image` field can be:
-- Raw base64 string
-- Full data URI (`data:image/png;base64,...`)
+The `image` field can be a raw base64 string or a full data URI (`data:image/png;base64,...`).
 
 ### Encrypted request (Fernet)
 
-Set `ENCRYPTION_KEY` env var on the endpoint (a Fernet key).
+Set `ENCRYPTION_KEY` env var on the endpoint. Generate one with:
+
+```bash
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
 
 ```json
 {
@@ -70,13 +112,11 @@ Set `ENCRYPTION_KEY` env var on the endpoint (a Fernet key).
 }
 ```
 
-The handler decrypts the prompt, processes it, and encrypts the output if requested.
-
 ### Optional parameters
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `system_prompt` | Sulphur-2 enhancer system prompt | Override the system instruction |
+| `system_prompt` | `$SYSTEM_PROMPT` env var | Override the system instruction per-request |
 | `max_tokens` | 512 | Max generation length |
 | `temperature` | 0.7 | Sampling temperature |
 | `top_p` | 0.9 | Nucleus sampling |
@@ -112,61 +152,36 @@ The handler decrypts the prompt, processes it, and encrypts the output if reques
 }
 ```
 
-## Deploy on RunPod Serverless
+## How It Works
 
-1. Build and push the Docker image to a registry (Docker Hub, GHCR, etc.).
-2. In RunPod Console → Serverless → New Endpoint:
-   - **Container Image:** your registry image URL
-   - **GPU:** RTX 4090 or better
-   - **Workers:** configure min/max as needed
-   - **Environment Variables**:
-     - `ENCRYPTION_KEY` — Fernet key for encryption (optional)
-     - `MODEL_PATH` — override default model path (optional)
-     - `MMPROJ_PATH` — override default mmproj path (optional)
-3. Configure **Model Cache** to pull from `Floppyshy/prompt-enhancer`.
+1. Container starts → handler.py imports → waits for first request
+2. On first request, handler spawns `llama-server` as a subprocess with the GGUF model
+3. Handler polls llama-server's `/health` endpoint until ready
+4. Each RunPod job is translated to an OpenAI-format chat completion request
+5. Request is POSTed to llama-server's `/v1/chat/completions`
+6. Response is cleaned (thinking tags stripped), optionally encrypted, and returned
 
-## Proxy Server (`server.py`)
+llama-server stays loaded between requests on a warm worker. Only the first
+invocation pays the model-load cost.
 
-A FastAPI proxy that sits between your client and RunPod. It handles:
+## Using Your Own Model
 
-- **Encryption** — encrypts prompts before sending to RunPod
-- **Server-side polling** — polls RunPod for completion so your client doesn't have to
-- **Persistent history** — stores all requests/responses in SQLite (`history.db`)
-
-### Setup
+Set these env vars to point to any GGUF model:
 
 ```bash
-pip install -r requirements-server.txt
-cp .env.example .env
-# Edit .env with your RunPod credentials and optional Fernet key
-python server.py
+MODEL_PATH=/runpod-volume/models/my-model.gguf      # or let it be discovered from cache
+HF_REPO_ID=my-org/my-model-repo
+MODEL_FILE=my-model-Q4_K_M.gguf
+MMPROJ_FILE=my-model-mmproj.gguf                     # optional, for vision
+SYSTEM_PROMPT=You are a prompt enhancer for flux...
 ```
 
-### Proxy API
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/enhance` | POST | Submit a job. Returns `{job_id, status}` immediately |
-| `/jobs/{job_id}` | GET | Get job status + result |
-| `/history` | GET | List all jobs (newest first). Query: `?limit=50&offset=0` |
-| `/history/{job_id}` | DELETE | Delete a job from local history |
-
-### Example
-
-```bash
-curl -X POST http://localhost:8000/enhance \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "a cat in a spacesuit"}'
-
-# Returns: {"job_id": "...", "status": "queued"}
-
-# Poll locally for result
-curl http://localhost:8000/jobs/{job_id}
-```
+The handler will use your model and system prompt for all requests. Per-request
+`system_prompt` overrides the default.
 
 ## Notes
 
-- The handler pre-loads the model at import time. First invocation pays the VRAM load cost; subsequent invocations on a warm worker are fast.
-- If the mmproj file is missing, vision mode is gracefully unavailable and the handler falls back to text-only enhancement.
+- llama.cpp is compiled from source with CUDA in the Docker build stage — no pre-built binary dependency.
+- If the mmproj file is missing, vision mode is unavailable and the handler falls back to text-only.
 - Thinking tags (`<think>...</think>`) are automatically stripped from the output.
-- The GitHub Action validates that the Dockerfile builds cleanly on every push to `main`.
+- The GitHub Action validates that the Dockerfile builds on every push to `main`.

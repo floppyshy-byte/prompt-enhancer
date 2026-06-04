@@ -1,50 +1,67 @@
 # =============================================================================
 # Sulphur Prompt Enhancer — RunPod Serverless Worker
 # =============================================================================
-# Standalone endpoint for prompt enhancement.
-# Loads the Qwen3.5-based 9B GGUF model + mmproj vision projection from
-# RunPod Model Cache (HF repo: Floppyshy/prompt-enhancer).
+# Uses llama.cpp's llama-server binary (built from source with CUDA) for
+# inference instead of llama-cpp-python.
 #
 # Deploy to RunPod Serverless with the image.
 # =============================================================================
 
+# ---------------------------------------------------------------------------
+# Stage 1: Build llama.cpp with CUDA support
+# ---------------------------------------------------------------------------
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS llama-builder
+
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        git \
+        cmake \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pin to a specific release tag for reproducibility
+ARG LLAMA_CPP_VERSION=b9496
+RUN git clone --depth 1 --branch ${LLAMA_CPP_VERSION} \
+    https://github.com/ggml-org/llama.cpp.git /llama.cpp
+
+WORKDIR /llama.cpp
+RUN cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --config Release -j$(nproc) --target llama-server
+
+# ---------------------------------------------------------------------------
+# Stage 2: Runtime
+# ---------------------------------------------------------------------------
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
-ENV PIP_PREFER_BINARY=1
 
-# ---------------------------------------------------------------------------
-# System deps + Python 3 (default 3.10 in Ubuntu 22.04)
-# ---------------------------------------------------------------------------
+# System deps — much leaner: no cmake, ninja, or build-essential needed
 RUN apt-get update -y --fix-missing \
     && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
-        python3-dev \
         python3-venv \
-        build-essential \
-        cmake \
-        ninja-build \
-        pkg-config \
-        libssl-dev \
-        git \
         wget \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# ---------------------------------------------------------------------------
-# Python deps
-# ---------------------------------------------------------------------------
+# Python deps — just runpod + cryptography (no llama-cpp-python)
 COPY requirements.txt /requirements.txt
 RUN python3 -m pip install --upgrade pip setuptools wheel \
     && python3 -m pip install -r /requirements.txt
 
-# ---------------------------------------------------------------------------
+# Copy llama-server binary from build stage
+COPY --from=llama-builder /llama.cpp/build/bin/llama-server /usr/local/bin/llama-server
+
+# Verify the binary works
+RUN llama-server --version
+
 # App
-# ---------------------------------------------------------------------------
 WORKDIR /app
 COPY handler.py /app/handler.py
 

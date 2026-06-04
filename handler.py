@@ -1,16 +1,22 @@
 """
-RunPod Serverless Handler — Sulphur Prompt Enhancer
+RunPod Serverless Handler — Generic Prompt Enhancer
 
-A lightweight standalone endpoint that loads the Sulphur-2 prompt enhancer
-GGUF model (Qwen3.5-based, 9B) and its mmproj vision projection from
-RunPod Model Cache.
+A lightweight serverless endpoint that loads any GGUF model (with optional
+mmproj vision projection) from RunPod Model Cache and uses llama.cpp's
+llama-server binary for inference.
+
+The system prompt is fully configurable — pass it per-request or set a
+default via env var. Works with any instruct/chat model.
+
+Uses llama.cpp's llama-server binary as a subprocess for inference
+instead of llama-cpp-python.
 
 Input (plain text):
 {
   "input": {
     "prompt": "a basketball player doing a cool maneuver",
+    "system_prompt": "...",        // optional, overrides default
     "image": "base64...",          // optional
-    "system_prompt": "...",        // optional
     "max_tokens": 512,             // optional, default 512
     "temperature": 0.7,            // optional, default 0.7
     "top_p": 0.9,                  // optional, default 0.9
@@ -52,25 +58,34 @@ Output (encrypted):
 }
 """
 
-import base64
+import atexit
+import json
 import os
 import re
+import signal
+import subprocess
+import time
+import urllib.request
+import urllib.error
+
 import runpod
 from cryptography.fernet import Fernet, InvalidToken
-from llama_cpp import Llama
-from llama_cpp.llama_chat_format import Qwen25VLChatHandler
 
 # ---------------------------------------------------------------------------
-# Config
+# Config — all model/discovery settings are overridable via env vars
 # ---------------------------------------------------------------------------
-HF_REPO_ID = "Floppyshy/prompt-enhancer"
-MODEL_FILE = "sulphur_prompt_enhancer-Q4_K_M-imatrix.gguf"
-MMPROJ_FILE = "sulphur_prompt_enhancer-mmproj-BF16.gguf"
+HF_REPO_ID = os.environ.get("HF_REPO_ID", "Floppyshy/prompt-enhancer")
+MODEL_FILE = os.environ.get("MODEL_FILE", "sulphur_prompt_enhancer-Q4_K_M-imatrix.gguf")
+MMPROJ_FILE = os.environ.get("MMPROJ_FILE", "sulphur_prompt_enhancer-mmproj-BF16.gguf")
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are the Sulphur-2 Prompt Enhancer. Expand the user input into a rich, "
-    "detailed video generation description. Output ONLY the finalized prompt paragraph string. "
-    "No chat, no filler."
+LLAMA_SERVER_PORT = int(os.environ.get("LLAMA_SERVER_PORT", "8081"))
+LLAMA_SERVER_HOST = "127.0.0.1"
+LLAMA_SERVER_URL = f"http://{LLAMA_SERVER_HOST}:{LLAMA_SERVER_PORT}"
+
+DEFAULT_SYSTEM_PROMPT = os.environ.get(
+    "SYSTEM_PROMPT",
+    "You are a prompt enhancer. Expand the user input into a rich, detailed "
+    "description. Output ONLY the finalized prompt. No chat, no filler.",
 )
 
 # ---------------------------------------------------------------------------
@@ -177,49 +192,128 @@ def _resolve_model_path() -> tuple[str, str | None]:
 
 
 # ---------------------------------------------------------------------------
-# Globals (loaded once at cold start)
+# llama-server subprocess management
 # ---------------------------------------------------------------------------
-_llm = None
-_model_path = None
-_mmproj_path = None
+_server_process: subprocess.Popen | None = None
 
 
-def _load_llm(n_gpu_layers=-1):
-    """Load the LLM once. Uses vision handler if mmproj is available."""
-    global _llm, _model_path, _mmproj_path
-    if _llm is not None:
-        return _llm
+def _find_llama_server() -> str:
+    """Locate the llama-server binary. Checks env var first, then PATH."""
+    binary = os.environ.get("LLAMA_SERVER_BINARY")
+    if binary and os.path.isfile(binary):
+        return binary
 
-    _model_path, _mmproj_path = _resolve_model_path()
+    # Check common locations
+    candidates = [
+        "/usr/local/bin/llama-server",
+        "/usr/bin/llama-server",
+        "/app/llama-server",
+        "llama-server",  # rely on PATH
+    ]
+    for c in candidates:
+        if os.path.isfile(c) or (c == "llama-server"):
+            # 'which' check for PATH-based
+            return c
 
-    if _mmproj_path and os.path.exists(_mmproj_path):
-        print("[enhancer] Loading vision-capable LLM + mmproj...")
-        chat_handler = Qwen25VLChatHandler(
-            clip_model_path=_mmproj_path,
-            verbose=False,
-        )
-        _llm = Llama(
-            model_path=_model_path,
-            chat_handler=chat_handler,
-            n_ctx=4096,
-            n_gpu_layers=n_gpu_layers,
-            verbose=False,
-        )
-        print("[enhancer] Vision LLM loaded.")
+    raise FileNotFoundError(
+        "llama-server binary not found. "
+        "Set LLAMA_SERVER_BINARY env var or install llama.cpp."
+    )
+
+
+def _start_llama_server(n_gpu_layers: int = -1) -> None:
+    """Spawn llama-server as a subprocess and wait until it's ready."""
+    global _server_process
+
+    if _server_process is not None:
+        return
+
+    model_path, mmproj_path = _resolve_model_path()
+    llama_binary = _find_llama_server()
+
+    cmd = [
+        llama_binary,
+        "-m", model_path,
+        "--host", LLAMA_SERVER_HOST,
+        "--port", str(LLAMA_SERVER_PORT),
+        "-ngl", str(n_gpu_layers),
+        "--ctx-size", "4096",
+    ]
+
+    if mmproj_path and os.path.isfile(mmproj_path):
+        print("[enhancer] Vision enabled — loading with mmproj...")
+        cmd.extend(["--mmproj", mmproj_path])
     else:
-        print("[enhancer] Loading text-only LLM (mmproj not found)...")
-        _llm = Llama(
-            model_path=_model_path,
-            chat_format="chatml",
-            n_ctx=4096,
-            n_gpu_layers=n_gpu_layers,
-            verbose=False,
-        )
-        print("[enhancer] Text-only LLM loaded.")
+        print("[enhancer] No mmproj — text-only mode.")
 
-    return _llm
+    print(f"[enhancer] Starting llama-server: {' '.join(cmd)}")
+    _server_process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    # Register cleanup
+    atexit.register(_stop_llama_server)
+    signal.signal(signal.SIGTERM, lambda *_: _stop_llama_server())
+    signal.signal(signal.SIGINT, lambda *_: _stop_llama_server())
+
+    # Wait for llama-server to be ready
+    _wait_for_server(60)
 
 
+def _stop_llama_server() -> None:
+    """Terminate the llama-server subprocess."""
+    global _server_process
+    if _server_process is None:
+        return
+    print("[enhancer] Stopping llama-server...")
+    _server_process.terminate()
+    try:
+        _server_process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        _server_process.kill()
+        _server_process.wait()
+    _server_process = None
+    print("[enhancer] llama-server stopped.")
+
+
+def _wait_for_server(timeout_sec: int = 60) -> None:
+    """Poll llama-server /health until it responds 200 OK."""
+    start = time.monotonic()
+    url = f"{LLAMA_SERVER_URL}/health"
+    last_error = None
+
+    while time.monotonic() - start < timeout_sec:
+        # Check if the process died
+        if _server_process is not None and _server_process.poll() is not None:
+            stderr = _server_process.stderr.read() if _server_process.stderr else ""
+            raise RuntimeError(
+                f"llama-server exited unexpectedly (code {_server_process.returncode}).\n"
+                f"stderr: {stderr[:2000]}"
+            )
+
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    print(f"[enhancer] llama-server ready on port {LLAMA_SERVER_PORT}")
+                    return
+        except (urllib.error.URLError, OSError) as e:
+            last_error = e
+
+        time.sleep(0.5)
+
+    raise TimeoutError(
+        f"llama-server did not become ready within {timeout_sec}s. "
+        f"Last error: {last_error}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Inference via llama-server HTTP API
+# ---------------------------------------------------------------------------
 def _strip_thinking_tags(text: str) -> str:
     """Strip <think>...</think> tags if present."""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
@@ -236,7 +330,7 @@ def _build_data_uri(image_b64: str) -> str:
 
 
 def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> dict:
-    """Run the prompt enhancer and return the enhanced text."""
+    """Run the prompt enhancer via llama-server and return the enhanced text."""
     options = options or {}
     system_prompt = options.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
     max_tokens = int(options.get("max_tokens", 512))
@@ -246,8 +340,10 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
     repeat_penalty = float(options.get("repeat_penalty", 1.1))
     n_gpu_layers = int(options.get("n_gpu_layers", -1))
 
-    llm = _load_llm(n_gpu_layers)
+    # Ensure llama-server is running (first call starts it)
+    _start_llama_server(n_gpu_layers)
 
+    # Build messages in OpenAI chat format
     messages = []
     if system_prompt.strip():
         messages.append({"role": "system", "content": system_prompt.strip()})
@@ -264,14 +360,38 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
     else:
         messages.append({"role": "user", "content": prompt.strip()})
 
-    response = llm.create_chat_completion(
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        repeat_penalty=repeat_penalty,
+    # Build OpenAI-compatible request body
+    request_body = {
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+        "top_k": top_k,
+        "repeat_penalty": repeat_penalty,
+        "stream": False,
+    }
+
+    data = json.dumps(request_body).encode("utf-8")
+    url = f"{LLAMA_SERVER_URL}/v1/chat/completions"
+
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+        },
     )
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            response = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        raise RuntimeError(
+            f"llama-server returned HTTP {e.code}: {body[:1000]}"
+        )
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Failed to reach llama-server: {e}")
 
     raw_text = response["choices"][0]["message"]["content"]
     enhanced = _strip_thinking_tags(raw_text)
@@ -334,9 +454,10 @@ def handler(job):
 
 
 # ---------------------------------------------------------------------------
-# Pre-load model at import time so cold-start is just inference
+# Start llama-server at import time so cold-start latency is just the server
+# coming up + first inference. The first call to enhance_prompt() will trigger
+# _start_llama_server() which starts llama-server and waits for readiness.
 # ---------------------------------------------------------------------------
-print("[enhancer] Cold start — locating model in cache/VRAM...")
-_load_llm()
+print("[enhancer] Handler loaded. llama-server will start on first request.")
 
 runpod.serverless.start({"handler": handler})
