@@ -320,6 +320,8 @@ def _resolve_model_path() -> tuple[str, str | None]:
 # llama-server subprocess management
 # ---------------------------------------------------------------------------
 _server_process: subprocess.Popen | None = None
+_discovered_model: str = ""
+_discovered_mmproj: str = ""
 
 
 def _find_llama_server() -> str:
@@ -357,6 +359,9 @@ def _start_llama_server(n_gpu_layers: int = -1) -> None:
         return
 
     model_path, mmproj_path = _resolve_model_path()
+    global _discovered_model, _discovered_mmproj
+    _discovered_model = model_path
+    _discovered_mmproj = mmproj_path or ""
     llama_binary = _find_llama_server()
 
     cmd = [
@@ -565,6 +570,8 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
         "thinking": thinking,
         "input_prompt": prompt,
         "image_used": bool(image_b64),
+        "model": os.path.basename(_discovered_model),
+        "mmproj": os.path.basename(_discovered_mmproj) if _discovered_mmproj else None,
     }
 
 
