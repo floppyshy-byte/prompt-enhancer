@@ -11,16 +11,16 @@
 FROM ghcr.io/ggml-org/llama.cpp:server-cuda AS llama
 
 # ---------------------------------------------------------------------------
-# Stage 2: Python runtime with CUDA (Ubuntu 22.04)
+# Stage 2: Python runtime with CUDA (Ubuntu 24.04 — matches server-cuda GLIBC)
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.4.1-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
 
-# System dependencies (including libgomp1 for llama-server)
+# System deps (libgomp1 required by llama-server)
 RUN apt-get update -y --fix-missing \
     && apt-get install -y --no-install-recommends \
         python3 \
@@ -30,10 +30,10 @@ RUN apt-get update -y --fix-missing \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps — just runpod + cryptography
+# Python deps — --break-system-packages needed on Ubuntu 24.04 (PEP 668)
 COPY requirements.txt /requirements.txt
-RUN python3 -m pip install --upgrade pip setuptools wheel \
-    && python3 -m pip install -r /requirements.txt
+RUN python3 -m pip install --upgrade pip setuptools wheel --break-system-packages \
+    && python3 -m pip install -r /requirements.txt --break-system-packages
 
 # Extract llama-server binary and shared libraries from the official image
 # (verified: the server-cuda image puts everything in /app/)
@@ -43,7 +43,7 @@ COPY --from=llama /app/*.so* /usr/local/lib/
 # Rebuild runtime dynamic linker cache
 RUN ldconfig
 
-# Sanity check: verify binary starts (now that libgomp1 is present)
+# Sanity check: GLIBC 2.38 + libgomp1 are now satisfied
 RUN llama-server --version
 
 # App
