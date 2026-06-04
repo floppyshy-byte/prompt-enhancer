@@ -36,8 +36,9 @@ RUN python3 -m pip install --upgrade pip setuptools wheel \
     && python3 -m pip install -r /requirements.txt
 
 # Extract llama-server binary and shared libraries from the official image
-COPY --from=llama /llama-server /usr/local/bin/llama-server
-COPY --from=llama /*.so* /usr/local/lib/
+# (verified: the server-cuda image puts everything in /app/)
+COPY --from=llama /app/llama-server /usr/local/bin/llama-server
+COPY --from=llama /app/*.so* /usr/local/lib/
 
 # Rebuild runtime dynamic linker cache
 RUN ldconfig
