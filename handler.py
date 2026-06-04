@@ -442,7 +442,7 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
     """Run the prompt enhancer via llama-server and return the enhanced text."""
     options = options or {}
     system_prompt = options.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
-    max_tokens = int(options.get("max_tokens", 512))
+    max_tokens = int(options.get("max_tokens", 2048))
     temperature = float(options.get("temperature", 0.7))
     top_p = float(options.get("top_p", 0.9))
     top_k = int(options.get("top_k", 40))
@@ -513,21 +513,31 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
     sys.stderr.flush()
     print(dbg, flush=True)
 
-    raw_text = choice["message"]["content"]
-    dbg2 = f"[enhancer] Raw content: {raw_text!r}\n"
+    message = choice["message"]
+    raw_text = message.get("content", "") or ""
+
+    # Qwen3 models use reasoning_content for their thinking process.
+    # Include it in raw_response and fall back to it if content is empty.
+    reasoning = message.get("reasoning_content", "") or ""
+    if raw_text:
+        raw_text = reasoning + "\n\n" + raw_text if reasoning else raw_text
+    elif reasoning:
+        raw_text = reasoning
+
+    dbg2 = f"[enhancer] Raw content: {raw_text[:500]!r}...\n"
     sys.stderr.write(dbg2)
     sys.stderr.flush()
     print(dbg2, flush=True)
 
     enhanced = _strip_thinking_tags(raw_text)
-    dbg3 = f"[enhancer] Enhanced content: {enhanced!r}\n"
+    dbg3 = f"[enhancer] Enhanced content: {enhanced[:500]!r}...\n"
     sys.stderr.write(dbg3)
     sys.stderr.flush()
     print(dbg3, flush=True)
 
     return {
-        "enhanced_prompt": enhanced,
-        "raw_response": raw_text,
+        "enhanced_prompt": enhanced.strip(),
+        "raw_response": raw_text.strip(),
         "input_prompt": prompt,
         "image_used": bool(image_b64),
     }
