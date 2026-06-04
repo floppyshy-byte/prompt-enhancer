@@ -1,53 +1,40 @@
 # =============================================================================
 # Prompt Enhancer — RunPod Serverless Worker
 # =============================================================================
-# Uses llama.cpp's llama-server binary (from the official llama.cpp CUDA image)
-# for inference instead of llama-cpp-python.
+# Built directly on the official llama.cpp CUDA server image. No file copying,
+# no GLIBC mismatches — just add Python and the handler on top.
 # =============================================================================
 
-# ---------------------------------------------------------------------------
-# Stage 1: Reference the official llama.cpp CUDA image
-# ---------------------------------------------------------------------------
-FROM ghcr.io/ggml-org/llama.cpp:server-cuda AS llama
-
-# ---------------------------------------------------------------------------
-# Stage 2: Python runtime with CUDA (Ubuntu 24.04 — matches server-cuda GLIBC)
-# ---------------------------------------------------------------------------
-FROM nvidia/cuda:13.3.0-runtime-ubuntu24.04
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
 
-# System deps (libgomp1 required by llama-server)
+# Install Python on top of the official llama.cpp image
 RUN apt-get update -y --fix-missing \
     && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
         python3-venv \
         ca-certificates \
-        libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps — skip upgrading system pip to avoid Debian RECORD file crashes
+# Python deps
 COPY requirements.txt /requirements.txt
 RUN python3 -m pip install --no-cache-dir --break-system-packages -r /requirements.txt
 
-# Extract llama-server binary and shared libraries from the official image
-# (verified: the server-cuda image puts everything in /app/)
-COPY --from=llama /app/llama-server /usr/local/bin/llama-server
-COPY --from=llama /app/*.so* /usr/local/lib/
+# Symlink so handler finds llama-server on PATH
+RUN ln -s /app/llama-server /usr/local/bin/llama-server
 
-# Rebuild runtime dynamic linker cache
-RUN ldconfig
-
-# Sanity check: GLIBC 2.38 + libgomp1 are now satisfied
+# Sanity check
 RUN llama-server --version
 
 # App
 WORKDIR /app
 COPY handler.py /app/handler.py
 
-# RunPod serverless entrypoint
+# Reset inherited ENTRYPOINT so our CMD runs
+ENTRYPOINT []
 CMD ["python3", "-u", "handler.py"]
