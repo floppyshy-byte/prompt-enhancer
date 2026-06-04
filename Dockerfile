@@ -23,9 +23,10 @@ RUN apt-get update -y --fix-missing \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps — just runpod + cryptography
+# --break-system-packages needed: base image is Ubuntu 24.04 with PEP 668
 COPY requirements.txt /requirements.txt
-RUN python3 -m pip install --upgrade pip setuptools wheel \
-    && python3 -m pip install -r /requirements.txt
+RUN python3 -m pip install --break-system-packages --upgrade pip setuptools wheel \
+    && python3 -m pip install --break-system-packages -r /requirements.txt
 
 # App
 WORKDIR /app
