@@ -62,6 +62,7 @@ import atexit
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
@@ -256,12 +257,15 @@ def _resolve_model_path() -> tuple[str, str | None]:
                 print(f"[enhancer] Auto-discovered mmproj (larger .gguf): {mmproj_path}")
 
         else:  # count >= 3
-            files_list = "\n".join(f"  {size:>15d}  {path}" for size, path in gguf_files)
-            raise FileNotFoundError(
-                f"Found {count} .gguf files in cache — don't know which is the model "
-                f"and which is the mmproj. Set MODEL_FILE and MMPROJ_FILE to be explicit.\n"
-                f"Files found:\n{files_list}"
-            )
+            if not model_path:
+                # Can't determine anything — need explicit config
+                files_list = "\n".join(f"  {size:>15d}  {path}" for size, path in gguf_files)
+                raise FileNotFoundError(
+                    f"Found {count} .gguf files in cache — don't know which is the model "
+                    f"and which is the mmproj. Set MODEL_FILE and MMPROJ_FILE to be explicit.\n"
+                    f"Files found:\n{files_list}"
+                )
+            # model_path already known from env — just skip mmproj discovery
 
     if not mmproj_path:
         print("[enhancer] No mmproj found; vision will be disabled.")
@@ -286,12 +290,15 @@ def _find_llama_server() -> str:
         "/usr/local/bin/llama-server",
         "/usr/bin/llama-server",
         "/app/llama-server",
-        "llama-server",  # rely on PATH
     ]
     for c in candidates:
-        if os.path.isfile(c) or (c == "llama-server"):
-            # 'which' check for PATH-based
+        if os.path.isfile(c):
             return c
+
+    # Check PATH
+    found = shutil.which("llama-server")
+    if found:
+        return found
 
     raise FileNotFoundError(
         "llama-server binary not found. "
