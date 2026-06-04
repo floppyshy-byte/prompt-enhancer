@@ -1,5 +1,5 @@
 # =============================================================================
-# Sulphur Prompt Enhancer — RunPod Serverless Worker
+# Prompt Enhancer — RunPod Serverless Worker
 # =============================================================================
 # Uses llama.cpp's llama-server binary (built from source with CUDA) for
 # inference instead of llama-cpp-python.
@@ -16,6 +16,7 @@ RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
         git \
         cmake \
+        ccache \
         build-essential \
     && rm -rf /var/lib/apt/lists/*
 
@@ -25,10 +26,14 @@ RUN git clone --depth 1 --branch ${LLAMA_CPP_VERSION} \
     https://github.com/ggml-org/llama.cpp.git /llama.cpp
 
 WORKDIR /llama.cpp
-RUN cmake -B build \
-    -DGGML_CUDA=ON \
-    -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build build --config Release -j$(nproc) --target llama-server
+RUN --mount=type=cache,target=/root/.ccache \
+    cmake -B build \
+        -DGGML_CUDA=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+    && cmake --build build --config Release -j$(nproc) --target llama-server \
+    && ccache -s
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime
