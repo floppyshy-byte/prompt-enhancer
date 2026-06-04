@@ -502,17 +502,7 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
     except urllib.error.URLError as e:
         raise RuntimeError(f"Failed to reach llama-server: {e}")
 
-    # Debug: log the raw response (stderr for reliable capture on RunPod)
-    import sys
     choice = response["choices"][0]
-    dbg = (
-        f"[enhancer] finish_reason={choice.get('finish_reason')!r}\n"
-        f"[enhancer] Raw response: {json.dumps(response, indent=2)[:2000]}\n"
-    )
-    sys.stderr.write(dbg)
-    sys.stderr.flush()
-    print(dbg, flush=True)
-
     message = choice["message"]
     raw_text = message.get("content", "") or ""
 
@@ -524,16 +514,11 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
     elif reasoning:
         raw_text = reasoning
 
-    dbg2 = f"[enhancer] Raw content: {raw_text[:500]!r}...\n"
-    sys.stderr.write(dbg2)
-    sys.stderr.flush()
-    print(dbg2, flush=True)
+    print(f"[enhancer] finish_reason={choice.get('finish_reason')!r}  "
+          f"content_len={len(raw_text)}  reasoning_len={len(reasoning)}",
+          flush=True)
 
     enhanced = _strip_thinking_tags(raw_text)
-    dbg3 = f"[enhancer] Enhanced content: {enhanced[:500]!r}...\n"
-    sys.stderr.write(dbg3)
-    sys.stderr.flush()
-    print(dbg3, flush=True)
 
     return {
         "enhanced_prompt": enhanced.strip(),
