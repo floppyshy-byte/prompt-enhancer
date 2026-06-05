@@ -20,7 +20,7 @@ dependency.
 | File | Purpose |
 |------|---------|
 | `Dockerfile` | Multi-stage build: compiles llama.cpp with CUDA, then installs Python deps |
-| `handler.py` | RunPod serverless handler (text + vision + Fernet encryption) |
+| `handler.py` | RunPod serverless handler (text + vision + AES-256-GCM encryption) |
 | `requirements.txt` | Python dependencies (`runpod`, `cryptography`) |
 | `.github/workflows/docker-build.yml` | CI — validates Dockerfile builds on push/PR |
 
@@ -45,7 +45,7 @@ auto-discovers models from the RunPod Model Cache if not specified.
 | `HF_REPO_ID` | no | — (scans all cache) | HF repo to search for models in cache |
 | `MODEL_FILE` | no | — (auto-discovered) | Specific model filename in cache |
 | `MMPROJ_FILE` | no | — (auto-discovered) | Specific mmproj filename in cache |
-| `ENCRYPTION_KEY` | no | — | Fernet key for encrypt/decrypt |
+| `COMFY_ENCRYPTION_KEY` | no | — | Hex-encoded 32-byte AES-256 key for encrypt/decrypt |
 | `LLAMA_SERVER_PORT` | no | `8081` | Internal port for llama-server |
 | `MAX_TOKENS` | no | `5000` | Default max generation length (tokens) |
 
@@ -113,19 +113,22 @@ it automatically — no env vars needed.
 
 The `image` field can be a raw base64 string or a full data URI (`data:image/png;base64,...`).
 
-### Encrypted request (Fernet)
+### Encrypted request (AES-256-GCM)
 
-Set `ENCRYPTION_KEY` env var on the endpoint. Generate one with:
+Set `COMFY_ENCRYPTION_KEY` env var on the endpoint. Generate one with:
 
 ```bash
-python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+python3 -c "import secrets; print(secrets.token_hex(32))"
 ```
+
+The prompt is encrypted with AES-256-GCM (same scheme as z-image-turbo / ModelRouter):
 
 ```json
 {
   "input": {
-    "encrypted_prompt": "gAAAAAB...",
-    "encrypt_output": true
+    "encryption": true,
+    "encrypted_prompt": "base64(nonce||ciphertext||tag)...",
+    "max_tokens": 512
   }
 }
 ```
@@ -141,7 +144,6 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 | `top_k` | 40 | Top-k sampling |
 | `repeat_penalty` | 1.1 | Repetition penalty |
 | `n_gpu_layers` | -1 | GPU layers (-1 = all) |
-| `encrypt_output` | false | Encrypt the response fields |
 
 ### Response
 
@@ -159,13 +161,15 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 
 ### Encrypted response
 
+When `encryption=true` or `encrypted_prompt` was provided, output text fields are encrypted:
+
 ```json
 {
   "output": {
-    "enhanced_prompt": "gAAAAAB...",
-    "raw_response": "gAAAAAB...",
-    "thinking": "gAAAAAB...",
-    "input_prompt": "a basketball player doing a cool maneuver",
+    "enhanced_prompt": "base64(nonce||ciphertext||tag)...",
+    "raw_response": "base64(nonce||ciphertext||tag)...",
+    "thinking": "base64(nonce||ciphertext||tag)...",
+    "input_prompt": "base64(nonce||ciphertext||tag)...",
     "image_used": false,
     "encrypted": true
   }

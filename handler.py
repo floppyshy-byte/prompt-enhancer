@@ -26,20 +26,17 @@ Input (plain text):
   }
 }
 
-Input (encrypted payload):
+Input (encrypted prompt — same scheme as z-image-turbo):
 {
   "input": {
-    "encrypted_payload": "gAAAAAB..."  // Fernet-encrypted JSON
+    "encryption": true,
+    "encrypted_prompt": "base64(nonce||ciphertext||tag)...",
+    "max_tokens": 512,
+    ...
   }
 }
 
-Decrypting the payload yields the full input dict, e.g.:
-{
-  "prompt": "a basketball player...",
-  "encrypt_output": true,
-  "max_tokens": 512,
-  ...
-}
+The encrypted_prompt is decrypted with AES-256-GCM using COMFY_ENCRYPTION_KEY.
 
 Output (plain):
 {
@@ -52,18 +49,21 @@ Output (plain):
   }
 }
 
-Output (encrypted):
+Output (encrypted — when encryption=true or encrypted_prompt was sent):
 {
   "output": {
-    "encrypted_payload": "gAAAAAB...",  // full result JSON as one encrypted blob
+    "enhanced_prompt": "base64(nonce||ciphertext||tag)...",
+    "raw_response": "base64(nonce||ciphertext||tag)...",
+    "thinking": "base64(nonce||ciphertext||tag)...",
+    "input_prompt": "base64(nonce||ciphertext||tag)...",
+    "image_used": true/false,
     "encrypted": true
   }
 }
-
-Decrypting the payload yields the full result dict.
 """
 
 import atexit
+import base64
 import json
 import os
 import re
@@ -75,7 +75,7 @@ import urllib.request
 import urllib.error
 
 import runpod
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # ---------------------------------------------------------------------------
 # Config — all model/discovery settings are overridable via env vars
@@ -95,68 +95,49 @@ DEFAULT_SYSTEM_PROMPT = os.environ.get(
 )
 
 # ---------------------------------------------------------------------------
-# Encryption helpers
+# Encryption helpers (AES-256-GCM — same as z-image-turbo / ModelRouter)
 # ---------------------------------------------------------------------------
-_fernet = None
+_encryption_key = None
 
 
-def _get_fernet() -> Fernet | None:
-    """Lazy-load Fernet from ENCRYPTION_KEY env var."""
-    global _fernet
-    if _fernet is not None:
-        return _fernet
-
-    key = os.environ.get("ENCRYPTION_KEY")
-    if not key:
-        return None
-
-    # Fernet keys are 32 bytes urlsafe base64 encoded (43 chars + optional padding)
-    # Accept raw base64 or already-urlsafe-base64
-    key_b = key.encode()
-    try:
-        # If the user gave a standard base64 string, convert padding
-        if len(key_b) == 44 and key_b.endswith(b"="):
+def _load_encryption_key():
+    global _encryption_key
+    raw = os.environ.get("COMFY_ENCRYPTION_KEY", "")
+    if raw:
+        try:
+            key = bytes.fromhex(raw)
+            if len(key) == 32:
+                _encryption_key = key
+        except ValueError:
             pass
-        elif len(key_b) == 43:
-            key_b += b"="
-        _fernet = Fernet(key_b)
-    except Exception as exc:
-        raise ValueError(f"Invalid ENCRYPTION_KEY format: {exc}")
-
-    return _fernet
 
 
-def _decrypt_text(token: str) -> str:
-    """Decrypt a Fernet token. Returns plain text."""
-    f = _get_fernet()
-    if f is None:
-        raise ValueError("encrypted_prompt provided but ENCRYPTION_KEY is not set.")
-    try:
-        return f.decrypt(token.encode()).decode("utf-8")
-    except InvalidToken:
-        raise ValueError("Invalid encrypted_prompt token (bad key or corrupted data).")
+_load_encryption_key()
 
 
-def _encrypt_text(plaintext: str) -> str:
-    """Encrypt plain text with Fernet. Returns base64 token string."""
-    f = _get_fernet()
-    if f is None:
-        raise ValueError("encrypt_output requested but ENCRYPTION_KEY is not set.")
-    return f.encrypt(plaintext.encode("utf-8")).decode("utf-8")
+def _has_encryption_key():
+    return _encryption_key is not None
 
 
-def _encrypt_json(data: dict) -> str:
-    """Encrypt a dict as a JSON string. Returns base64 token string."""
-    return _encrypt_text(json.dumps(data, ensure_ascii=False))
+def _decrypt_aes(token: str) -> str:
+    """Decrypt a base64(nonce || ciphertext || tag) token with AES-256-GCM."""
+    if _encryption_key is None:
+        raise ValueError("COMFY_ENCRYPTION_KEY not set")
+    data = base64.b64decode(token)
+    aesgcm = AESGCM(_encryption_key)
+    nonce = data[:12]
+    ciphertext = data[12:]
+    return aesgcm.decrypt(nonce, ciphertext, None).decode("utf-8")
 
 
-def _decrypt_json(token: str) -> dict:
-    """Decrypt a Fernet token and parse as JSON. Returns a dict."""
-    plaintext = _decrypt_text(token)
-    try:
-        return json.loads(plaintext)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Decrypted payload is not valid JSON: {exc}")
+def _encrypt_aes(plaintext: str) -> str:
+    """Encrypt plain text with AES-256-GCM. Returns base64(nonce || ciphertext || tag)."""
+    if _encryption_key is None:
+        raise ValueError("COMFY_ENCRYPTION_KEY not set")
+    aesgcm = AESGCM(_encryption_key)
+    nonce = os.urandom(12)
+    ciphertext = aesgcm.encrypt(nonce, plaintext.encode("utf-8"), None)
+    return base64.b64encode(nonce + ciphertext).decode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -581,44 +562,45 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
 def handler(job):
     job_input = job.get("input", {})
 
-    # --- payload decryption -----------------------------------------------
-    encrypted_payload = job_input.get("encrypted_payload")
-    if encrypted_payload:
+    # --- prompt decryption -----------------------------------------------
+    encrypted_prompt = job_input.get("encrypted_prompt")
+    if encrypted_prompt:
         try:
-            decrypted = _decrypt_json(encrypted_payload)
-            if not isinstance(decrypted, dict):
-                return {"error": "Decrypted payload must be a JSON object"}
-            # Merge decrypted payload with outer job_input (outer wins on conflict)
-            merged = {**decrypted, **job_input}
-            merged.pop("encrypted_payload", None)
-            job_input = merged
-        except ValueError as exc:
-            return {"error": str(exc)}
+            prompt = _decrypt_aes(encrypted_prompt)
+        except Exception as exc:
+            return {"error": f"Failed to decrypt prompt: {exc}"}
+    else:
+        prompt = job_input.get("prompt", "")
 
-    prompt = job_input.get("prompt", "").strip()
+    prompt = prompt.strip()
     if not prompt:
         return {"error": "Missing required field: 'prompt'"}
 
     image_b64 = job_input.get("image") or None
-    encrypt_output = bool(job_input.get("encrypt_output", False))
+    use_encryption = bool(job_input.get("encryption", False)) or bool(encrypted_prompt)
 
     # Pass through any extra options
     options = {
         k: v
         for k, v in job_input.items()
-        if k not in ("prompt", "image", "encrypt_output")
+        if k not in ("prompt", "image", "encrypted_prompt", "encryption")
     }
 
     try:
         result = enhance_prompt(prompt, image_b64=image_b64, options=options)
 
         # --- output encryption ---------------------------------------------
-        if encrypt_output:
+        if use_encryption:
             try:
-                return {"output": {
-                    "encrypted_payload": _encrypt_json(result),
-                    "encrypted": True,
-                }}
+                encrypted_result = {}
+                for key in ("enhanced_prompt", "raw_response", "thinking", "input_prompt"):
+                    if key in result:
+                        encrypted_result[key] = _encrypt_aes(str(result[key]))
+                for key in ("image_used", "model", "mmproj"):
+                    if key in result:
+                        encrypted_result[key] = result[key]
+                encrypted_result["encrypted"] = True
+                return {"output": encrypted_result}
             except ValueError as exc:
                 return {"error": str(exc)}
 
