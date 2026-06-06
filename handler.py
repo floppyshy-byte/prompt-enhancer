@@ -94,6 +94,12 @@ DEFAULT_SYSTEM_PROMPT = os.environ.get(
     "description. Output ONLY the finalized prompt. No chat, no filler.",
 )
 
+# Prepended to every system prompt to suppress reasoning/thinking output.
+NO_THINKING_PREFIX = (
+    "Do not show your reasoning. Do not use <think> tags. "
+    "Do not output thinking steps. Output ONLY the final result. "
+)
+
 # ---------------------------------------------------------------------------
 # Encryption helpers (AES-256-GCM — same as z-image-turbo / ModelRouter)
 # ---------------------------------------------------------------------------
@@ -455,6 +461,9 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
     """Run the prompt enhancer via llama-server and return the enhanced text."""
     options = options or {}
     system_prompt = options.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+    # Prepend no-thinking instruction unless explicitly disabled
+    if not options.get("disable_no_thinking_prefix", False):
+        system_prompt = NO_THINKING_PREFIX + system_prompt
     max_tokens = int(
         options.get("max_tokens", os.environ.get("MAX_TOKENS", 5000))
     )
