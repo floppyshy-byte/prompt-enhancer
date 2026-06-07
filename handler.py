@@ -493,6 +493,10 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
     else:
         messages.append({"role": "user", "content": prompt.strip()})
 
+    # Architectural disable for Qwen3 reasoning mode (requires recent llama.cpp).
+    # Falls back gracefully if the server doesn't support chat_template_kwargs.
+    enable_thinking = bool(options.get("enable_thinking", False))
+
     # Build OpenAI-compatible request body
     request_body = {
         "messages": messages,
@@ -502,6 +506,7 @@ def enhance_prompt(prompt: str, image_b64: str = None, options: dict = None) -> 
         "top_k": top_k,
         "repeat_penalty": repeat_penalty,
         "stream": False,
+        "chat_template_kwargs": {"enable_thinking": enable_thinking},
     }
 
     data = json.dumps(request_body).encode("utf-8")
